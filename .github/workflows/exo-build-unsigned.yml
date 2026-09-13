@@ -202,7 +202,11 @@ jobs:
         run: |
           set -euo pipefail
           TAG="exo-build-$(date +%Y%m%d)-${{ github.run_number }}"
+          # ⚠️ 必须显式 --repo：本仓库只是"构建配置的载体"，
+          # checkout 步骤签出的是上游 exo-explore/exo，工作目录里的 git remote 因此指向上游，
+          # 不加 --repo 时 gh 会把 Release 建到 exo-explore/exo 上 → HTTP 403 Resource not accessible by integration
           gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             "output/EXO-${EXO_VERSION}.dmg" \
             "output/EXO-${EXO_VERSION}.dmg.sha256" \
             --title "EXO ${EXO_VERSION} (unsigned)" \
