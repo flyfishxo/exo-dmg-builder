@@ -1,0 +1,183 @@
+# ============================================================
+# EXO 最新源码 → 未签名 dmg（借 GitHub 的 macOS runner 编译）
+#
+# 【放哪里】不需要 fork 上游仓库。新建一个**你自己的公开仓库**，
+#          把本文件放到 .github/workflows/exo-build-unsigned.yml 即可。
+#          下面的 checkout 步骤直接从 exo-explore/exo 拉源码。
+#
+# 【为什么必须公开】GitHub 对公开仓库的标准 runner 免费且不限量；
+#          私有仓库会扣免费额度（macOS runner 按 10 倍倍率计费）。
+#
+# 【为什么不用上游自带的 build-app.yml】它强依赖 6 个 Secret
+#          （MACOS_CERTIFICATE / PROVISIONING_PROFILE / SPARKLE_* / AWS_*），
+#          在别人的仓库里跑必然卡死在「Prepare code-signing keychain」。
+#          本文件 = 官方 CI 剔除 Apple 证书/公证/Sparkle/AWS 依赖后的版本。
+#
+# 【runner 规格】macos-26 = Apple Silicon (M1) / 3 vCPU / 7GB RAM / 14GB SSD
+#          上游官方 CI 也跑在这个规格上（workflow 里写的就是 macos-26），够用。
+#
+# 【代价】产物未签名、未公证 → 首次打开需右键「打开」或去 quarantine；
+#          没有 Sparkle 自动更新；依赖 Provisioning Profile 的系统级能力
+#          （网络桥接等）可能不可用。核心推理功能不受影响。
+# ============================================================
+
+name: Build EXO DMG (unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的 git ref（分支/标签/commit）'
+        required: true
+        default: main
+        type: string
+      publish_release:
+        description: '是否额外发布到 Release（得到匿名可下载直链，便于传内网）'
+        required: true
+        default: true
+        type: boolean
+
+# 需要 write 才能创建 Release；只下载 artifact 的话 read 就够
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout upstream exo
+        uses: actions/checkout@v4
+        with:
+          repository: exo-explore/exo
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Show environment
+        run: |
+          sw_vers
+          uname -m
+          df -h /
+          xcodebuild -version
+          xcrun -f metal || echo "::warning::Metal toolchain 未找到"
+          node -v || echo "node missing"
+          cargo --version || echo "cargo missing"
+
+      - name: Ensure Metal toolchain
+        run: |
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            echo "尝试下载 Metal toolchain（Xcode 26 起为独立组件）"
+            xcodebuild -downloadComponent MetalToolchain || {
+              echo "::error::Metal toolchain 不可用，EXO 的 MLX 运行时无法编译"
+              exit 1
+            }
+          fi
+          xcrun -f metal
+
+      - name: Install just
+        run: brew install just
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync Python deps (含 mlx)
+        run: |
+          uv python install
+          # mlx 自 2026-08 起被移入 extra，不带 --extra mlx 会导致
+          # API 正常启动但每个 runner 崩 ModuleNotFoundError（上游 issue #2156）
+          uv sync --locked --extra mlx || uv sync --extra mlx
+
+      - name: Compute version
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          echo "EXO_VERSION=1.0.72-dev.$SHA" >> "$GITHUB_ENV"
+          echo "EXO_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "产物版本号：1.0.72-dev.$SHA"
+
+      - name: Build Rust bindings
+        run: just rust-rebuild
+
+      - name: Build dashboard
+        run: just build-dashboard
+
+      - name: Build PyInstaller bundle
+        run: |
+          uv run pyinstaller --noconfirm packaging/pyinstaller/exo.spec
+          df -h /
+          du -sh dist/exo 2>/dev/null || true
+
+      - name: Build Swift app
+        run: |
+          set -euo pipefail
+          cd app/EXO
+          # CODE_SIGN_IDENTITY="-" = ad-hoc 签名，无需开发者证书。
+          # 若仍报签名错误，把下面三行替换为 CODE_SIGNING_ALLOWED=NO 再试。
+          xcodebuild clean build \
+            -project EXO.xcodeproj \
+            -scheme EXO \
+            -configuration Release \
+            -derivedDataPath build \
+            MARKETING_VERSION="$EXO_VERSION" \
+            CURRENT_PROJECT_VERSION=1 \
+            EXO_BUILD_TAG="$EXO_VERSION" \
+            EXO_BUILD_COMMIT="$EXO_BUILD_COMMIT" \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=YES
+          mkdir -p ../../output
+          cp -R build/Build/Products/Release/EXO.app ../../output/EXO.app
+
+      - name: Inject runtime and ad-hoc sign
+        run: |
+          set -euo pipefail
+          rm -rf output/EXO.app/Contents/Resources/exo
+          mkdir -p output/EXO.app/Contents/Resources
+          cp -R dist/exo output/EXO.app/Contents/Resources/exo
+          find output/EXO.app/Contents/Resources/exo -type f \
+            \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) -print0 |
+            while IFS= read -r -d '' f; do
+              codesign --force --sign - "$f" 2>/dev/null || true
+            done
+          codesign --force --deep --sign - output/EXO.app
+          codesign --verify --deep --strict --verbose=2 output/EXO.app || true
+          df -h /
+
+      - name: Create DMG
+        run: |
+          set -euo pipefail
+          cd output
+          mkdir -p dmg-root
+          cp -R EXO.app dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "EXO" -srcfolder dmg-root -ov -format UDZO "EXO-${EXO_VERSION}.dmg"
+          ls -lh "EXO-${EXO_VERSION}.dmg"
+          shasum -a 256 "EXO-${EXO_VERSION}.dmg" | tee "EXO-${EXO_VERSION}.dmg.sha256"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EXO-dmg-${{ env.EXO_VERSION }}
+          path: output/EXO-${{ env.EXO_VERSION }}.dmg
+          retention-days: 30
+
+      # 关键一步：发布到 Release 后得到**匿名可下载**的直链，
+      # 内网机器无需 GitHub 账号即可拉取。
+      - name: Publish download link (Release)
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="exo-build-$(date +%Y%m%d)-${{ github.run_number }}"
+          gh release create "$TAG" \
+            "output/EXO-${EXO_VERSION}.dmg" \
+            "output/EXO-${EXO_VERSION}.dmg.sha256" \
+            --title "EXO ${EXO_VERSION} (unsigned)" \
+            --notes "从 exo-explore/exo@${{ inputs.ref }} ($EXO_BUILD_COMMIT) 编译的未签名 dmg。仅供内部测试，需 macOS 26.2+。安装后如被 Gatekeeper 拦截：xattr -dr com.apple.quarantine /Applications/EXO.app"
+          echo "下载直链："
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/EXO-${EXO_VERSION}.dmg"
