@@ -104,6 +104,24 @@ jobs:
       - name: Build dashboard
         run: just build-dashboard
 
+      # spec 第 73 行：shutil.which("macmon") 找不到即 abort，并指明必须装这个 fork 的固定 rev。
+      # 上游 CI 靠 `nix develop` 提供；这里用 spec 自身推荐的 cargo 方式，少一个 Nix 依赖。
+      # 注意：Homebrew 的同名 macmon 不被接受（上游会主动 brew uninstall 掉）。
+      - name: Install pinned macmon
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "cargo 缺失 → 安装 Rust"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+          fi
+          brew uninstall macmon 2>/dev/null || true
+          cargo install --git https://github.com/vladkens/macmon \
+            --rev a1cd06b6cc0d5e61db24fd8832e74cd992097a7d macmon --force
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "macmon 位置: $(which macmon)"
+          ls -lh "$(which macmon)"
+
       # ⚠️ 关键修复：just rust-rebuild 内部执行的是
       #   `uv sync --reinstall-package exo_rs` —— 不带 --extra mlx，
       #   而 uv sync 会把环境同步成"期望状态"，于是把上面装好的 mlx 又卸掉了。
