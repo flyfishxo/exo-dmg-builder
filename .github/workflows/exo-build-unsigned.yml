@@ -89,7 +89,7 @@ jobs:
           uv python install
           # mlx 自 2026-08 起被移入 extra，不带 --extra mlx 会导致
           # API 正常启动但每个 runner 崩 ModuleNotFoundError（上游 issue #2156）
-          uv sync --locked --extra mlx || uv sync --extra mlx
+          uv sync --all-packages --extra mlx
 
       - name: Compute version
         run: |
@@ -103,6 +103,16 @@ jobs:
 
       - name: Build dashboard
         run: just build-dashboard
+
+      # ⚠️ 关键修复：just rust-rebuild 内部执行的是
+      #   `uv sync --reinstall-package exo_rs` —— 不带 --extra mlx，
+      #   而 uv sync 会把环境同步成"期望状态"，于是把上面装好的 mlx 又卸掉了。
+      #   上游 CI 没事是因为它跑 `just build-app`(rust-rebuild → sync-clean → package)，
+      #   中间的 sync-clean 会把 mlx 装回来；拆开步骤执行必须自己补这一步。
+      - name: Re-sync mlx before packaging
+        run: |
+          uv sync --all-packages --extra mlx
+          uv run python -c "import mlx; print('mlx OK ->', mlx.__file__)"
 
       - name: Build PyInstaller bundle
         run: |
