@@ -13,8 +13,10 @@
 #          在别人的仓库里跑必然卡死在「Prepare code-signing keychain」。
 #          本文件 = 官方 CI 剔除 Apple 证书/公证/Sparkle/AWS 依赖后的版本。
 #
-# 【runner 规格】macos-26 = Apple Silicon (M1) / 3 vCPU / 7GB RAM / 14GB SSD
-#          上游官方 CI 也跑在这个规格上（workflow 里写的就是 macos-26），够用。
+# 【runner 规格】macos-26 = Apple Silicon (M1) / 3 vCPU / 7GB RAM
+#          实测构建机根分区 320Gi 总量 / 81Gi 可用（2026-09-13 验证），磁盘不是瓶颈。
+#          ⚠️ 2026-10 起上游把 MLX 改为 git 源码构建，构建时长从 ~26min 涨到可能 1.5-2h，
+#             timeout 因此由 120 放宽到 300。
 #
 # 【代价】产物未签名、未公证 → 首次打开需右键「打开」或去 quarantine；
 #          没有 Sparkle 自动更新；依赖 Provisioning Profile 的系统级能力
@@ -44,7 +46,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 300
 
     steps:
       - name: Checkout upstream exo
@@ -89,7 +91,13 @@ jobs:
           uv python install
           # mlx 自 2026-08 起被移入 extra，不带 --extra mlx 会导致
           # API 正常启动但每个 runner 崩 ModuleNotFoundError（上游 issue #2156）
+          #
+          # ⚠️ 2026-10 上游变更：pyproject 的 [tool.uv.sources] 已把 darwin 的 mlx 指向
+          #    git = ml-explore/mlx.git @ 0e3ff364（为修复 fast-synch 张量并行死锁）。
+          #    这一步会现场 clone + 编译 MLX（C++/Metal），耗时远超前几版，属预期行为。
           uv sync --all-packages --extra mlx
+          uv run python -c "import mlx; print('mlx OK ->', mlx.__file__, mlx.__version__ if hasattr(mlx,'__version__') else '')"
+
 
       - name: Compute version
         run: |
