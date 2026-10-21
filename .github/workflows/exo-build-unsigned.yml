@@ -140,9 +140,61 @@ jobs:
           uv sync --all-packages --extra mlx
           uv run python -c "import mlx; print('mlx OK ->', mlx.__file__)"
 
+      # ============================================================
+      # 补丁：kimi_k25 模型模块
+      #
+      # 根因（2026-10-19 定位）：
+      #   exo 的 src/exo/worker/engines/mlx/vision.py 存在别名不一致：
+      #     · 第 223/228 行 _import_mlx_vlm() 走了 _MLX_VLM_MODEL_TYPE_ALIASES
+      #       （kimi_k25 -> kimi_vl），正常
+      #     · 第 261 行 load_image_processor 分支直接 import
+      #       f"mlx_vlm.models.{self._config.model_type}" —— 漏了别名
+      #   → 对 Kimi K2.6 / K2.7-Code（config.json 的 model_type = kimi_k25）
+      #     必然抛 No module named 'mlx_vlm.models.kimi_k25'
+      #
+      # 叠加因素：exo 的 uv.lock 把 mlx-vlm 钉在 0.4.4（2026-04-04），
+      #   而 kimi_k25 模块从 mlx-vlm 0.5.0（2026-05-06）才引入。
+      #
+      # 修法（外科手术式）：只补 6 个文件，不动 mlx-vlm 其余 59 个模型。
+      #   依赖已验证全部满足：
+      #     · mlx_vlm.models.base.InputEmbeddingsFeatures —— 0.4.4 已有
+      #     · mlx_vlm.models.kernels.bicubic_interpolate  —— 0.4.4 已有
+      #     · mlx_vlm/models/__init__.py 在 0.4.4 是空文件（纯动态 import）
+      #     · processing_kimi_k25.py 不依赖 cv2
+      # ============================================================
+      - name: Patch kimi_k25 into bundled mlx-vlm
+        run: |
+          set -euo pipefail
+          SP=$(uv run python -c "import mlx_vlm, os; print(os.path.dirname(mlx_vlm.__file__))")
+          echo "mlx_vlm 安装位置: $SP"
+          uv run python -c "import mlx_vlm; print('mlx-vlm version:', getattr(mlx_vlm,'__version__','?'))"
+
+          # 已存在则跳过（未来上游升级到 >=0.5.0 后自动失效，无害）
+          if uv run python -c "import mlx_vlm.models.kimi_k25" 2>/dev/null; then
+            echo "kimi_k25 已存在，跳过补丁"
+            exit 0
+          fi
+
+          mkdir -p "$SP/models/kimi_k25"
+          BASE="https://raw.githubusercontent.com/Blaizzy/mlx-vlm/v0.5.0/mlx_vlm/models/kimi_k25"
+          for f in __init__.py config.py kimi_k25.py language.py processing_kimi_k25.py vision.py; do
+            echo "  下载 $f"
+            curl -fsSL --retry 3 "$BASE/$f" -o "$SP/models/kimi_k25/$f"
+          done
+          ls -lh "$SP/models/kimi_k25"
+
+          # 断言：能导入才算成功，避免又跑 30 分钟才发现
+          uv run python -c "
+import mlx_vlm.models.kimi_k25 as m
+print('kimi_k25 导入成功:', m.__file__)
+from mlx_vlm.models.kimi_k25 import LanguageModel, Model, VisionModel, ImageProcessor, Processor
+print('关键类齐全: Model / LanguageModel / VisionModel / Processor OK')
+"
+
       - name: Build PyInstaller bundle
         run: |
           uv run pyinstaller --noconfirm packaging/pyinstaller/exo.spec
+          uv run python -c "import mlx_vlm.models.kimi_k25" && echo "打包环境确认 kimi_k25 可导入"
           df -h /
           du -sh dist/exo 2>/dev/null || true
 
