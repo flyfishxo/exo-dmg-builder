@@ -184,12 +184,7 @@ jobs:
           ls -lh "$SP/models/kimi_k25"
 
           # 断言：能导入才算成功，避免又跑 30 分钟才发现
-          uv run python -c "
-import mlx_vlm.models.kimi_k25 as m
-print('kimi_k25 导入成功:', m.__file__)
-from mlx_vlm.models.kimi_k25 import LanguageModel, Model, VisionModel, ImageProcessor, Processor
-print('关键类齐全: Model / LanguageModel / VisionModel / Processor OK')
-"
+          uv run python -c "import mlx_vlm.models.kimi_k25 as m; print('kimi_k25 导入成功:', m.__file__); from mlx_vlm.models.kimi_k25 import LanguageModel, Model, VisionModel, ImageProcessor, Processor; print(chr(0x5173)+chr(0x952e)+chr(0x7c7b)+chr(0x9f50)+chr(0x5168))"
 
       - name: Build PyInstaller bundle
         run: |
