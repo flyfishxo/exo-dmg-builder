@@ -95,16 +95,16 @@ jobs:
           # ⚠️ 2026-10 上游变更：pyproject 的 [tool.uv.sources] 已把 darwin 的 mlx 指向
           #    git = ml-explore/mlx.git @ 0e3ff364（为修复 fast-synch 张量并行死锁）。
           #    这一步会现场 clone + 编译 MLX（C++/Metal），耗时远超前几版，属预期行为。
-          uv sync --all-packages --extra mlx
+          uv sync --all-packages
           uv run python -c "import mlx; print('mlx OK ->', mlx.__file__, mlx.__version__ if hasattr(mlx,'__version__') else '')"
 
 
       - name: Compute version
         run: |
           SHA=$(git rev-parse --short HEAD)
-          echo "EXO_VERSION=1.0.72-dev.$SHA" >> "$GITHUB_ENV"
+          echo "EXO_VERSION=1.0.71-k2.7patch" >> "$GITHUB_ENV"
           echo "EXO_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "产物版本号：1.0.72-dev.$SHA"
+          echo "产物版本号：1.0.71-k2.7patch（v1.0.71 源码 + K2.7 卡片）"
 
       - name: Build Rust bindings
         run: just rust-rebuild
@@ -137,54 +137,36 @@ jobs:
       #   中间的 sync-clean 会把 mlx 装回来；拆开步骤执行必须自己补这一步。
       - name: Re-sync mlx before packaging
         run: |
-          uv sync --all-packages --extra mlx
+          uv sync --all-packages
           uv run python -c "import mlx; print('mlx OK ->', mlx.__file__)"
 
       # ============================================================
-      # 补丁：kimi_k25 模型模块
+      # 注入 Kimi K2.7-Code 模型卡
       #
-      # 根因（2026-10-19 定位）：
-      #   exo 的 src/exo/worker/engines/mlx/vision.py 存在别名不一致：
-      #     · 第 223/228 行 _import_mlx_vlm() 走了 _MLX_VLM_MODEL_TYPE_ALIASES
-      #       （kimi_k25 -> kimi_vl），正常
-      #     · 第 261 行 load_image_processor 分支直接 import
-      #       f"mlx_vlm.models.{self._config.model_type}" —— 漏了别名
-      #   → 对 Kimi K2.6 / K2.7-Code（config.json 的 model_type = kimi_k25）
-      #     必然抛 No module named 'mlx_vlm.models.kimi_k25'
+      # 依据：v1.0.71 的 vision.py L39-42 已有
+      #   _MLX_VLM_MODEL_TYPE_ALIASES = {"kimi_k25": "kimi_vl", "kimi_k26": "kimi_vl"}
+      # 说明代码层早已预留 K2.7 支持，只是 v1.0.71 的 resources 里没有这张卡片。
       #
-      # 叠加因素：exo 的 uv.lock 把 mlx-vlm 钉在 0.4.4（2026-04-04），
-      #   而 kimi_k25 模块从 mlx-vlm 0.5.0（2026-05-06）才引入。
-      #
-      # 修法（外科手术式）：只补 6 个文件，不动 mlx-vlm 其余 59 个模型。
-      #   依赖已验证全部满足：
-      #     · mlx_vlm.models.base.InputEmbeddingsFeatures —— 0.4.4 已有
-      #     · mlx_vlm.models.kernels.bicubic_interpolate  —— 0.4.4 已有
-      #     · mlx_vlm/models/__init__.py 在 0.4.4 是空文件（纯动态 import）
-      #     · processing_kimi_k25.py 不依赖 cv2
+      # 处理：从上游 main 取卡片，删掉 v1.0.71 的 ModelCard 不认识的 `backends` 字段
+      #   （v1.0.71 的 ModelCard 字段清单见 src/exo/shared/models/model_cards.py L135-153）
       # ============================================================
-      - name: Patch kimi_k25 into bundled mlx-vlm
+      - name: Add Kimi K2.7-Code model card
         run: |
           set -euo pipefail
-          SP=$(uv run python -c "import mlx_vlm, os; print(os.path.dirname(mlx_vlm.__file__))")
-          echo "mlx_vlm 安装位置: $SP"
-          uv run python -c "import mlx_vlm; print('mlx-vlm version:', getattr(mlx_vlm,'__version__','?'))"
-
-          # 已存在则跳过（未来上游升级到 >=0.5.0 后自动失效，无害）
-          if uv run python -c "import mlx_vlm.models.kimi_k25" 2>/dev/null; then
-            echo "kimi_k25 已存在，跳过补丁"
-            exit 0
-          fi
-
-          mkdir -p "$SP/models/kimi_k25"
-          BASE="https://raw.githubusercontent.com/Blaizzy/mlx-vlm/v0.5.0/mlx_vlm/models/kimi_k25"
-          for f in __init__.py config.py kimi_k25.py language.py processing_kimi_k25.py vision.py; do
-            echo "  下载 $f"
-            curl -fsSL --retry 3 "$BASE/$f" -o "$SP/models/kimi_k25/$f"
-          done
-          ls -lh "$SP/models/kimi_k25"
-
-          # 断言：能导入才算成功，避免又跑 30 分钟才发现
-          uv run python -c "import mlx_vlm.models.kimi_k25 as m; print('kimi_k25 导入成功:', m.__file__); from mlx_vlm.models.kimi_k25 import LanguageModel, Model, VisionModel, ImageProcessor, Processor; print(chr(0x5173)+chr(0x952e)+chr(0x7c7b)+chr(0x9f50)+chr(0x5168))"
+          CARD="resources/inference_model_cards/moonshotai--Kimi-K2.7-Code.toml"
+          mkdir -p resources/inference_model_cards
+          curl -fsSL --retry 3 \
+            "https://raw.githubusercontent.com/exo-explore/exo/main/resources/inference_model_cards/moonshotai--Kimi-K2.7-Code.toml" \
+            -o /tmp/k27_raw.toml
+          echo "--- 上游原始卡片 ---"
+          cat /tmp/k27_raw.toml
+          # 去掉 backends 行（v1.0.71 不识别）
+          grep -v '^backends[[:space:]]*=' /tmp/k27_raw.toml > "$CARD"
+          echo "--- 写入后 ---"
+          cat "$CARD"
+          # TOML 解析 + 关键字段断言
+          uv run python -c "import tomllib; d=tomllib.load(open('$CARD','rb')); req=['model_id','n_layers','hidden_size','supports_tensor','tasks']; miss=[k for k in req if k not in d]; assert not miss, f'missing {miss}'; print('卡片 OK:', d['model_id'], '| layers:', d['n_layers'], '| vision:', d['vision']['model_type'])"
+          ls -l resources/inference_model_cards | tail -5
 
       - name: Build PyInstaller bundle
         run: |
